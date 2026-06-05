@@ -200,6 +200,6 @@ if os.path.isdir(_STATIC):
     app.mount("/assets", StaticFiles(directory=os.path.join(_STATIC, "assets")), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(_: str):
+    async def serve_spa(full_path: str):
         return FileResponse(os.path.join(_STATIC, "index.html"))
 
