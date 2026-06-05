@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -189,4 +191,15 @@ Return ONLY valid JSON with no markdown or explanation:
         summary=summary,
         advice=advice,
     )
+
+
+# ── Serve frontend (must be last) ─────────────────────────────────────────────
+_STATIC = os.path.join(os.path.dirname(__file__), "static")
+
+if os.path.isdir(_STATIC):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_STATIC, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(_: str):
+        return FileResponse(os.path.join(_STATIC, "index.html"))
 

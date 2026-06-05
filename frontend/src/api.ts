@@ -1,6 +1,6 @@
 import type { CheckinResponse } from './types'
 
-const BASE = 'https://mood-analyser-85114001640.asia-south1.run.app'
+const BASE = import.meta.env.DEV ? 'http://localhost:8000' : ''
 
 async function request<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
