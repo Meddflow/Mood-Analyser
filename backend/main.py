@@ -15,6 +15,22 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 from google import genai
 from google.genai import types
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+_FIREBASE_PROJECT = os.getenv("FIREBASE_PROJECT_ID")
+_SA_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+_SA_PATH = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "./google.json")
+
+if _SA_JSON:
+    _cred = credentials.Certificate(json.loads(_SA_JSON))
+else:
+    _sa_abs = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", _SA_PATH))
+    _cred = credentials.Certificate(_sa_abs)
+
+firebase_admin.initialize_app(_cred, {"projectId": _FIREBASE_PROJECT} if _FIREBASE_PROJECT else {})
+db = firestore.client()
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
 VERTEX_LOCATION = "asia-south1"
@@ -83,6 +99,12 @@ class CheckinRequest(BaseModel):
     selected_score: int | None = None
 
 
+class PatientCheckinRequest(BaseModel):
+    patient_id: str
+    text: str
+    selected_score: int | None = None
+
+
 class CheckinResponse(BaseModel):
     session_id: str
     mood_score: int        # final blended score
@@ -94,23 +116,18 @@ class CheckinResponse(BaseModel):
     advice: str
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── Shared analysis logic ─────────────────────────────────────────────────────
 
-@app.post("/api/checkin", response_model=CheckinResponse)
-async def checkin(req: CheckinRequest):
-    if not req.text.strip():
-        raise HTTPException(400, "Please share how you're feeling")
-
+def _build_prompt(text: str, selected_score: int | None) -> str:
     hint = (
-        f"\nThe user also self-rated their mood as {req.selected_score}/5 — weigh this alongside their words."
-        if req.selected_score
+        f"\nThe user also self-rated their mood as {selected_score}/5 — weigh this alongside their words."
+        if selected_score
         else ""
     )
-
-    prompt = f"""You are an empathetic mood analyst. A user has shared a personal reflection with you.
+    return f"""You are an empathetic mood analyst. A user has shared a personal reflection with you.
 
 Their reflection:
-"{req.text}"{hint}
+"{text}"{hint}
 
 Your tasks:
 1. Score their mood from 1 to 5:
@@ -133,10 +150,13 @@ Your tasks:
 Return ONLY valid JSON with no markdown or explanation:
 {{"score": <integer 1–5>, "summary": "<analytical read of their emotional state>", "advice": "<empathetic response>"}}"""
 
+
+async def _run_analysis(text: str, selected_score: int | None) -> tuple[int, int, str, str]:
+    """Returns (mood_score, text_score, summary, advice)."""
     try:
         resp = client.models.generate_content(
             model=MODEL,
-            contents=prompt,
+            contents=_build_prompt(text, selected_score),
             config=types.GenerateContentConfig(
                 temperature=0.75,
                 response_mime_type="application/json",
@@ -149,14 +169,25 @@ Return ONLY valid JSON with no markdown or explanation:
     except Exception as e:
         raise HTTPException(500, f"Analysis failed: {e}")
 
-    # Blend: 60% text analysis + 40% self-selected emoji
-    if req.selected_score:
-        mood_score = max(1, min(5, round(0.6 * text_score + 0.4 * req.selected_score)))
-    else:
-        mood_score = text_score
+    mood_score = (
+        max(1, min(5, round(0.6 * text_score + 0.4 * selected_score)))
+        if selected_score
+        else text_score
+    )
+    return mood_score, text_score, summary, advice
 
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/checkin", response_model=CheckinResponse)
+async def checkin(req: CheckinRequest):
+    if not req.text.strip():
+        raise HTTPException(400, "Please share how you're feeling")
+
+    mood_score, text_score, summary, advice = await _run_analysis(req.text, req.selected_score)
     sid = str(uuid.uuid4())
     emoji, label = MOODS[mood_score]
+    now = datetime.now(timezone.utc).isoformat()
 
     sessions[sid] = {
         "initial_text": req.text,
@@ -165,13 +196,13 @@ Return ONLY valid JSON with no markdown or explanation:
         "selected_score": req.selected_score,
         "summary": summary,
         "advice": advice,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now,
     }
 
     append_log({
         "type": "checkin",
         "session_id": sid,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now,
         "user_text": req.text,
         "text_score": text_score,
         "selected_score": req.selected_score,
@@ -180,6 +211,71 @@ Return ONLY valid JSON with no markdown or explanation:
         "summary": summary,
         "advice": advice,
     })
+
+    return CheckinResponse(
+        session_id=sid,
+        mood_score=mood_score,
+        text_score=text_score,
+        selected_score=req.selected_score,
+        mood_label=label,
+        mood_emoji=emoji,
+        summary=summary,
+        advice=advice,
+    )
+
+
+@app.post("/api/checkin/patient", response_model=CheckinResponse)
+async def checkin_patient(req: PatientCheckinRequest):
+    if not req.text.strip():
+        raise HTTPException(400, "Please share how you're feeling")
+    if not req.patient_id.strip():
+        raise HTTPException(400, "patient_id is required")
+
+    mood_score, text_score, summary, advice = await _run_analysis(req.text, req.selected_score)
+    sid = str(uuid.uuid4())
+    emoji, label = MOODS[mood_score]
+    now = datetime.now(timezone.utc).isoformat()
+
+    sessions[sid] = {
+        "initial_text": req.text,
+        "mood_score": mood_score,
+        "text_score": text_score,
+        "selected_score": req.selected_score,
+        "summary": summary,
+        "advice": advice,
+        "created_at": now,
+    }
+
+    append_log({
+        "type": "patient_checkin",
+        "session_id": sid,
+        "patient_id": req.patient_id,
+        "timestamp": now,
+        "user_text": req.text,
+        "text_score": text_score,
+        "selected_score": req.selected_score,
+        "mood_score": mood_score,
+        "mood_label": label,
+        "summary": summary,
+        "advice": advice,
+    })
+
+    try:
+        db.collection("MoodSummary").document(sid).set({
+            "patient_id": req.patient_id,
+            "session_id": sid,
+            "text": req.text,
+            "text_score": text_score,
+            "selected_score": req.selected_score,
+            "mood_score": mood_score,
+            "mood_label": label,
+            "mood_emoji": emoji,
+            "summary": summary,
+            "advice": advice,
+            "created_at": now,
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Firestore write failed: {e}")
 
     return CheckinResponse(
         session_id=sid,

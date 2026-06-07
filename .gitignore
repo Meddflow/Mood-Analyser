@@ -15,3 +15,6 @@ dist/
 
 # Env
 .env
+
+# Service account key
+google.json
