@@ -85,7 +85,11 @@ app = FastAPI(title="Mood Analyzer API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://dev.dhl807v1cwv58.amplifyapp.com",
+        "https://www.meddflow.com",
+        "https://meddflow.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
